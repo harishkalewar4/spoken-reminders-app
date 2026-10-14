@@ -9,131 +9,122 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class TimerItem(
-val id: Int,
-val label: String,
-val durationMillis: Long,
-val endTimeMillis: Long
+    val id: Int,
+    val label: String,
+    val durationMillis: Long,
+    val endTimeMillis: Long
 )
 
 object TimerRepository {
-private const val PREFS_NAME = "tts_timers_prefs"
-private const val KEY_TIMERS = "timers_json"
+    private const val PREFS_NAME = "tts_timers_prefs"
+    private const val KEY_TIMERS = "timers_json"
 
-fun getTimers(context: Context): List<TimerItem> {
-    val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    val jsonString = prefs.getString(KEY_TIMERS, "[]") ?: "[]"
-    val jsonArray = JSONArray(jsonString)
-    val list = mutableListOf<TimerItem>()
+    fun getTimers(context: Context): List<TimerItem> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val jsonString = prefs.getString(KEY_TIMERS, "[]") ?: "[]"
+        val jsonArray = JSONArray(jsonString)
+        val list = mutableListOf<TimerItem>()
 
-    val now = System.currentTimeMillis()
-    for (i in 0 until jsonArray.length()) {
-        val obj = jsonArray.getJSONObject(i)
-        val endTime = obj.getLong("endTimeMillis")
-        // Filter out expired timers that haven't been cleared yet
-        if (endTime > now) {
+        for (i in 0 until jsonArray.length()) {
+            val obj = jsonArray.getJSONObject(i)
             list.add(
                 TimerItem(
                     id = obj.getInt("id"),
                     label = obj.optString("label", ""),
                     durationMillis = obj.getLong("durationMillis"),
-                    endTimeMillis = endTime
+                    endTimeMillis = obj.getLong("endTimeMillis")
                 )
             )
         }
+        return list.sortedBy { it.endTimeMillis }
     }
-    return list.sortedBy { it.endTimeMillis }
-}
 
-fun addTimer(context: Context, timer: TimerItem) {
-    val current = getTimers(context).toMutableList()
-    current.add(timer)
-    saveAll(context, current)
-    TimerScheduler.schedule(context, timer)
-}
-
-fun deleteTimer(context: Context, timerId: Int) {
-    val current = getTimers(context).toMutableList()
-    val toRemove = current.find { it.id == timerId }
-    if (toRemove != null) {
-        TimerScheduler.cancel(context, toRemove)
-        current.remove(toRemove)
+    fun addTimer(context: Context, timer: TimerItem) {
+        val current = getTimers(context).toMutableList()
+        current.add(timer)
         saveAll(context, current)
+        TimerScheduler.schedule(context, timer)
     }
-}
 
-private fun saveAll(context: Context, list: List<TimerItem>) {
-    val jsonArray = JSONArray()
-    list.forEach { item ->
-        val obj = JSONObject().apply {
-            put("id", item.id)
-            put("label", item.label)
-            put("durationMillis", item.durationMillis)
-            put("endTimeMillis", item.endTimeMillis)
+    fun deleteTimer(context: Context, timerId: Int) {
+        val current = getTimers(context).toMutableList()
+        val toRemove = current.find { it.id == timerId }
+        if (toRemove != null) {
+            TimerScheduler.cancel(context, toRemove)
+            current.remove(toRemove)
+            saveAll(context, current)
         }
-        jsonArray.put(obj)
     }
-    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        .edit()
-        .putString(KEY_TIMERS, jsonArray.toString())
-        .apply()
-}
 
-
+    internal fun saveAll(context: Context, list: List<TimerItem>) {
+        val jsonArray = JSONArray()
+        list.forEach { item ->
+            val obj = JSONObject().apply {
+                put("id", item.id)
+                put("label", item.label)
+                put("durationMillis", item.durationMillis)
+                put("endTimeMillis", item.endTimeMillis)
+            }
+            jsonArray.put(obj)
+        }
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_TIMERS, jsonArray.toString())
+            .apply()
+    }
 }
 
 object TimerScheduler {
-fun schedule(context: Context, timer: TimerItem) {
-if (timer.endTimeMillis <= System.currentTimeMillis()) return
+    fun schedule(context: Context, timer: TimerItem) {
+        if (timer.endTimeMillis <= System.currentTimeMillis()) return
 
-    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val intent = Intent(context, ReminderReceiver::class.java).apply {
-        action = ReminderReceiver.ACTION_TRIGGER_TIMER
-        putExtra(ReminderReceiver.EXTRA_ID, timer.id)
-        putExtra(ReminderReceiver.EXTRA_LABEL, timer.label)
-    }
-
-    val pendingIntent = PendingIntent.getBroadcast(
-        context,
-        timer.id,
-        intent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-
-    try {
-        val canExact = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            alarmManager.canScheduleExactAlarms()
-        } else {
-            true
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(context, ReminderReceiver::class.java).apply {
+            action = ReminderReceiver.ACTION_TRIGGER_TIMER
+            putExtra(ReminderReceiver.EXTRA_ID, timer.id)
+            putExtra(ReminderReceiver.EXTRA_LABEL, timer.label)
         }
 
-        if (canExact) {
-            val alarmClockInfo = AlarmManager.AlarmClockInfo(timer.endTimeMillis, pendingIntent)
-            alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
-        } else {
-            alarmManager.setExactAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                timer.endTimeMillis,
-                pendingIntent
-            )
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            timer.id,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        try {
+            val canExact = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                alarmManager.canScheduleExactAlarms()
+            } else {
+                true
+            }
+
+            if (canExact) {
+                val alarmClockInfo = AlarmManager.AlarmClockInfo(timer.endTimeMillis, pendingIntent)
+                alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
+            } else {
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    timer.endTimeMillis,
+                    pendingIntent
+                )
+            }
+        } catch (e: SecurityException) {
+            alarmManager.set(AlarmManager.RTC_WAKEUP, timer.endTimeMillis, pendingIntent)
         }
-    } catch (e: SecurityException) {
-        alarmManager.set(AlarmManager.RTC_WAKEUP, timer.endTimeMillis, pendingIntent)
     }
-}
 
-fun cancel(context: Context, timer: TimerItem) {
-    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    val intent = Intent(context, ReminderReceiver::class.java).apply {
-        action = ReminderReceiver.ACTION_TRIGGER_TIMER
+    fun cancel(context: Context, timer: TimerItem) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(context, ReminderReceiver::class.java).apply {
+            action = ReminderReceiver.ACTION_TRIGGER_TIMER
+        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            context,
+            timer.id,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        alarmManager.cancel(pendingIntent)
     }
-    val pendingIntent = PendingIntent.getBroadcast(
-        context,
-        timer.id,
-        intent,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-    )
-    alarmManager.cancel(pendingIntent)
-}
-
-
 }
