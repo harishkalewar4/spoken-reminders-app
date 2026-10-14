@@ -9,6 +9,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
@@ -27,32 +29,29 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LifecycleResumeEffect
 
-@Composable
-fun SetupContent(
-    onFinishedOrSkipped: () -> Unit,
-    showContinueButton: Boolean
-) {
-    val context = LocalContext.current
-
-    var hasNotificationPermission by remember { mutableStateOf(true) }
-    var hasExactAlarmPermission by remember { mutableStateOf(true) }
-    var isIgnoringBatteryOptimizations by remember { mutableStateOf(true) }
-
-    fun checkPermissions() {
-        hasNotificationPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+object PermissionStatusHelper {
+    fun hasNotificationPermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
         } else {
             true
         }
+    }
 
-        hasExactAlarmPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+    fun hasExactAlarmPermission(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
             alarmManager.canScheduleExactAlarms()
         } else {
             true
         }
+    }
 
-        isIgnoringBatteryOptimizations = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+    fun isIgnoringBatteryOptimizations(context: Context): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
             pm.isIgnoringBatteryOptimizations(context.packageName)
         } else {
@@ -60,10 +59,65 @@ fun SetupContent(
         }
     }
 
+    fun areAllCriticalPermissionsGranted(context: Context): Boolean {
+        return hasNotificationPermission(context) &&
+            hasExactAlarmPermission(context) &&
+            isIgnoringBatteryOptimizations(context)
+    }
+}
+
+@Composable
+fun SetupContent(
+    onFinishedOrSkipped: () -> Unit,
+    showContinueButton: Boolean
+) {
+    val context = LocalContext.current
+
+    var hasNotificationPermission by remember {
+        mutableStateOf(PermissionStatusHelper.hasNotificationPermission(context))
+    }
+    var hasExactAlarmPermission by remember {
+        mutableStateOf(PermissionStatusHelper.hasExactAlarmPermission(context))
+    }
+    var isIgnoringBatteryOptimizations by remember {
+        mutableStateOf(PermissionStatusHelper.isIgnoringBatteryOptimizations(context))
+    }
+
+    fun checkPermissions() {
+        val prevExact = hasExactAlarmPermission
+        hasNotificationPermission = PermissionStatusHelper.hasNotificationPermission(context)
+        hasExactAlarmPermission = PermissionStatusHelper.hasExactAlarmPermission(context)
+        isIgnoringBatteryOptimizations = PermissionStatusHelper.isIgnoringBatteryOptimizations(context)
+
+        // If exact alarm permission was just granted, reschedule all active reminders and timers
+        if (!prevExact && hasExactAlarmPermission) {
+            ReminderRepository.getReminders(context).forEach { ReminderScheduler.schedule(context, it) }
+            TimerRepository.getTimers(context).forEach { TimerScheduler.schedule(context, it) }
+        }
+    }
+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasNotificationPermission = granted
+        if (!granted) {
+            try {
+                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                openAppSettingsFallback(context)
+            }
+        }
+    }
+
     LifecycleResumeEffect(Unit) {
         checkPermissions()
         onPauseOrDispose {}
     }
+
+    val allGranted = hasNotificationPermission && hasExactAlarmPermission && isIgnoringBatteryOptimizations
 
     Surface(
         modifier = Modifier.fillMaxSize(),
@@ -77,7 +131,7 @@ fun SetupContent(
             horizontalAlignment = Alignment.Start
         ) {
             item {
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = "Initial Setup",
                     style = MaterialTheme.typography.headlineLarge,
@@ -87,24 +141,24 @@ fun SetupContent(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "To ensure alarms fire precisely on time and your reminders are spoken aloud reliably in the background, please grant the following permissions.",
+                    text = "To ensure alarms fire precisely on time and your reminders are spoken aloud reliably while the screen is off, please complete each step below.",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onBackground
                 )
             }
 
-            // Notification Permission
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // Step 1: Battery Optimization (most critical for screen-off speech)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 item {
                     PermissionCard(
-                        title = "Notifications",
-                        description = "Required to display ongoing alerts while reminders are spoken.",
-                        isGranted = hasNotificationPermission,
-                        buttonText = "Grant Notification Permission",
+                        title = "Step 1: Background Running (Unrestricted Battery)",
+                        description = "Required so the system does not silence speech or block the alarm service when the screen is off.",
+                        isGranted = isIgnoringBatteryOptimizations,
+                        buttonText = "Allow Background Running",
                         onClick = {
                             try {
-                                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                    data = Uri.parse("package:${context.packageName}")
                                 }
                                 context.startActivity(intent)
                             } catch (e: Exception) {
@@ -115,12 +169,12 @@ fun SetupContent(
                 }
             }
 
-            // Exact Alarm Permission
+            // Step 2: Exact Alarm Permission
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 item {
                     PermissionCard(
-                        title = "Exact Alarms",
-                        description = "Required so your reminders and timers trigger precisely at the scheduled second.",
+                        title = "Step 2: Exact Alarms",
+                        description = "Required so your reminders and timers trigger at the exact scheduled minute even in deep sleep.",
                         isGranted = hasExactAlarmPermission,
                         buttonText = "Grant Exact Alarm Permission",
                         onClick = {
@@ -137,23 +191,16 @@ fun SetupContent(
                 }
             }
 
-            // Battery Optimization
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // Step 3: Notification Permission
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 item {
                     PermissionCard(
-                        title = "Background Running",
-                        description = "Ensures background services and alarms are not delayed or killed while the screen is off.",
-                        isGranted = isIgnoringBatteryOptimizations,
-                        buttonText = "Disable Battery Restrictions",
+                        title = "Step 3: Notifications",
+                        description = "Required to run the spoken alert foreground service.",
+                        isGranted = hasNotificationPermission,
+                        buttonText = "Grant Notification Permission",
                         onClick = {
-                            try {
-                                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                                    data = Uri.parse("package:${context.packageName}")
-                                }
-                                context.startActivity(intent)
-                            } catch (e: Exception) {
-                                openAppSettingsFallback(context)
-                            }
+                            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                         }
                     )
                 }
@@ -161,15 +208,21 @@ fun SetupContent(
 
             if (showContinueButton) {
                 item {
-                    Spacer(modifier = Modifier.height(24.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
                     Button(
-                        onClick = onFinishedOrSkipped,
+                        onClick = {
+                            ReminderRepository.setSetupCompleted(context, true)
+                            onFinishedOrSkipped()
+                        },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(50.dp),
+                            .height(52.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
                     ) {
-                        Text(text = "Continue to Reminders", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            text = if (allGranted) "Finish Setup" else "Continue to Reminders",
+                            style = MaterialTheme.typography.titleMedium
+                        )
                     }
                 }
             }
@@ -201,8 +254,13 @@ fun PermissionCard(
     buttonText: String,
     onClick: () -> Unit
 ) {
+    val statusText = if (isGranted) "Status: Completed" else "Status: Action Required"
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics(mergeDescendants = false) {
+                contentDescription = "$title. $statusText."
+            },
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
@@ -222,11 +280,12 @@ fun PermissionCard(
                     text = title,
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f)
                 )
                 Icon(
                     imageVector = if (isGranted) Icons.Default.CheckCircle else Icons.Default.Error,
-                    contentDescription = if (isGranted) "Granted" else "Not Granted",
+                    contentDescription = if (isGranted) "Granted" else "Action Required",
                     tint = if (isGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
                 )
             }
@@ -240,6 +299,7 @@ fun PermissionCard(
             if (!isGranted) {
                 Button(
                     onClick = onClick,
+                    modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.primary
                     )
@@ -248,7 +308,7 @@ fun PermissionCard(
                 }
             } else {
                 Text(
-                    text = "Permission granted",
+                    text = "Completed - Permission granted",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.SemiBold
