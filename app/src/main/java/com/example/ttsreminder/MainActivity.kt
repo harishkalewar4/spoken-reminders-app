@@ -44,8 +44,6 @@ import kotlin.random.Random
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Catch up any missed reminders/timers and verify scheduled alarms on app launch
-        ReminderReceiver.processCatchUpAndReschedule(applicationContext)
         setContent {
             SpokenRemindersTheme {
                 MainAppScreen()
@@ -75,11 +73,16 @@ fun MainAppScreen() {
 
     var remindersList by remember { mutableStateOf(ReminderRepository.getReminders(context)) }
     var timersList by remember { mutableStateOf(TimerRepository.getTimers(context)) }
+    var lastAlarmEvent by remember { mutableStateOf(ReminderRepository.getLastAlarmEvent(context)) }
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     LifecycleResumeEffect(Unit) {
         allPermissionsGranted = PermissionStatusHelper.areAllCriticalPermissionsGranted(context)
         remindersList = ReminderRepository.getReminders(context)
         timersList = TimerRepository.getTimers(context)
+        lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
         onPauseOrDispose {}
     }
 
@@ -91,6 +94,7 @@ fun MainAppScreen() {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             remindersList = ReminderRepository.getReminders(context)
             timersList = TimerRepository.getTimers(context)
+            lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
         }
         prefsReminders.registerOnSharedPreferenceChangeListener(listener)
         prefsTimers.registerOnSharedPreferenceChangeListener(listener)
@@ -106,11 +110,9 @@ fun MainAppScreen() {
             delay(1000L)
             remindersList = ReminderRepository.getReminders(context)
             timersList = TimerRepository.getTimers(context)
+            lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
         }
     }
-
-    val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
 
     Scaffold(
         topBar = {
@@ -119,9 +121,9 @@ fun MainAppScreen() {
                 actions = {
                     IconButton(
                         onClick = { showSettingsDialog = true },
-                        modifier = Modifier.semantics { contentDescription = "Settings and Permissions" }
+                        modifier = Modifier.semantics { contentDescription = "Settings" }
                     ) {
-                        Icon(imageVector = Icons.Default.Settings, contentDescription = null)
+                        Icon(imageVector = Icons.Default.Settings, contentDescription = "Settings")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -189,7 +191,7 @@ fun MainAppScreen() {
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = "Action Required: Background speech permissions are missing. Reminders may not speak when the screen is off.",
+                            text = "Action Required: Background speech or exact alarm permissions are missing. Reminders may not speak when the screen is off.",
                             style = MaterialTheme.typography.bodyMedium,
                             fontWeight = FontWeight.SemiBold,
                             color = MaterialTheme.colorScheme.onTertiaryContainer
@@ -201,7 +203,7 @@ fun MainAppScreen() {
                                 contentColor = MaterialTheme.colorScheme.onTertiary
                             )
                         ) {
-                            Text("Fix Permissions Now")
+                            Text("Review & Grant Permissions")
                         }
                     }
                 }
@@ -272,10 +274,30 @@ fun MainAppScreen() {
 
     if (showSettingsDialog) {
         SettingsDialog(
+            lastAlarmEvent = lastAlarmEvent,
             onDismiss = { showSettingsDialog = false },
             onOpenSetup = {
                 showSettingsDialog = false
                 showSetupScreen = true
+            },
+            onScheduleTestAlarm = {
+                val triggerAt = System.currentTimeMillis() + 60_000L
+                val testReminder = Reminder(
+                    id = Random.nextInt(100000, 499999),
+                    title = "Test alarm",
+                    category = "General",
+                    triggerTimeMillis = triggerAt,
+                    recurring = false
+                )
+                ReminderRepository.addReminder(context, testReminder)
+                remindersList = ReminderRepository.getReminders(context)
+                lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
+                showSettingsDialog = false
+                scope.launch {
+                    snackbarHostState.showSnackbar(
+                        message = "Test alarm scheduled for 1 minute from now. You can lock the screen now."
+                    )
+                }
             }
         )
     }
@@ -285,13 +307,15 @@ fun MainAppScreen() {
             onDismiss = { showAddReminderDialog = false },
             onSave = { title, category, triggerTime, recurring ->
                 val newReminder = Reminder(
-                    id = Random.nextInt(100000, 999999),
+                    id = Random.nextInt(100000, 499999),
                     title = title,
                     category = category,
                     triggerTimeMillis = triggerTime,
                     recurring = recurring
                 )
                 ReminderRepository.addReminder(context, newReminder)
+                remindersList = ReminderRepository.getReminders(context)
+                lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
                 showAddReminderDialog = false
             }
         )
@@ -302,12 +326,14 @@ fun MainAppScreen() {
             onDismiss = { showAddTimerDialog = false },
             onSave = { label, durationMillis ->
                 val newTimer = TimerItem(
-                    id = Random.nextInt(100000, 999999),
+                    id = Random.nextInt(500000, 999999),
                     label = label,
                     durationMillis = durationMillis,
                     endTimeMillis = System.currentTimeMillis() + durationMillis
                 )
                 TimerRepository.addTimer(context, newTimer)
+                timersList = TimerRepository.getTimers(context)
+                lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
                 showAddTimerDialog = false
             }
         )
@@ -591,7 +617,7 @@ fun AddReminderDialog(
     var category by remember { mutableStateOf("General") }
     var recurring by remember { mutableStateOf(false) }
 
-    val initialCal = remember { Calendar.getInstance().apply { add(Calendar.MINUTE, 5) } }
+    val initialCal = remember { Calendar.getInstance().apply { add(Calendar.MINUTE, 2) } }
     val initialUtcMillis = remember {
         Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
             set(Calendar.YEAR, initialCal.get(Calendar.YEAR))
@@ -608,12 +634,15 @@ fun AddReminderDialog(
         initialSelectedDateMillis = initialUtcMillis
     )
     var showDatePicker by remember { mutableStateOf(false) }
-    var showTimePicker by remember { mutableStateOf(false) }
-    // Default to keyboard/text input mode (true = TimeInput, false = TimePicker dial)
+
+    // Default to keyboard/text input mode (true = TimeInput, false = TimePicker clock dial)
     var isTextInputMode by remember { mutableStateOf(true) }
 
-    var selectedHour24 by remember { mutableIntStateOf(initialCal.get(Calendar.HOUR_OF_DAY)) }
-    var selectedMinute by remember { mutableIntStateOf(initialCal.get(Calendar.MINUTE)) }
+    val timePickerState = rememberTimePickerState(
+        initialHour = initialCal.get(Calendar.HOUR_OF_DAY),
+        initialMinute = initialCal.get(Calendar.MINUTE),
+        is24Hour = is24HourFormat
+    )
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -652,26 +681,48 @@ fun AddReminderDialog(
                     Text("Date: $dateStr")
                 }
 
-                OutlinedButton(
-                    onClick = {
-                        isTextInputMode = true
-                        showTimePicker = true
-                    },
-                    modifier = Modifier.fillMaxWidth()
+                // Inline header with visible toggle button between Keyboard TimeInput and Clock Dial TimePicker
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    val timeText = if (is24HourFormat) {
-                        String.format(Locale.getDefault(), "%02d:%02d", selectedHour24, selectedMinute)
-                    } else {
-                        val amPm = if (selectedHour24 >= 12) "PM" else "AM"
-                        val displayHour = when {
-                            selectedHour24 == 0 -> 12
-                            selectedHour24 > 12 -> selectedHour24 - 12
-                            else -> selectedHour24
+                    Text(
+                        text = if (isTextInputMode) "Time (Text Input)" else "Time (Clock Dial)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    IconButton(
+                        onClick = { isTextInputMode = !isTextInputMode },
+                        modifier = Modifier.semantics {
+                            contentDescription = if (isTextInputMode) {
+                                "Switch to clock dial"
+                            } else {
+                                "Switch to text input"
+                            }
                         }
-                        val displayMin = String.format(Locale.getDefault(), "%02d", selectedMinute)
-                        "$displayHour:$displayMin $amPm"
+                    ) {
+                        Icon(
+                            imageVector = if (isTextInputMode) Icons.Default.Schedule else Icons.Default.Keyboard,
+                            contentDescription = if (isTextInputMode) {
+                                "Switch to clock dial"
+                            } else {
+                                "Switch to text input"
+                            }
+                        )
                     }
-                    Text("Time: $timeText")
+                }
+
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isTextInputMode) {
+                        TimeInput(state = timePickerState)
+                    } else {
+                        TimePicker(state = timePickerState)
+                    }
                 }
 
                 Row(
@@ -709,22 +760,26 @@ fun AddReminderDialog(
                         set(Calendar.YEAR, utcCal.get(Calendar.YEAR))
                         set(Calendar.MONTH, utcCal.get(Calendar.MONTH))
                         set(Calendar.DAY_OF_MONTH, utcCal.get(Calendar.DAY_OF_MONTH))
-                        set(Calendar.HOUR_OF_DAY, selectedHour24)
-                        set(Calendar.MINUTE, selectedMinute)
+                        set(Calendar.HOUR_OF_DAY, timePickerState.hour.coerceIn(0, 23))
+                        set(Calendar.MINUTE, timePickerState.minute.coerceIn(0, 59))
                         set(Calendar.SECOND, 0)
                         set(Calendar.MILLISECOND, 0)
                     }
 
                     val now = System.currentTimeMillis()
                     if (targetCal.timeInMillis <= now) {
-                        if (recurring) {
-                            while (targetCal.timeInMillis <= now) {
-                                targetCal.add(Calendar.DAY_OF_YEAR, 1)
-                            }
+                        val todayCal = Calendar.getInstance()
+                        val isSameDaySelected =
+                            targetCal.get(Calendar.YEAR) == todayCal.get(Calendar.YEAR) &&
+                                targetCal.get(Calendar.DAY_OF_YEAR) == todayCal.get(Calendar.DAY_OF_YEAR) &&
+                                targetCal.get(Calendar.HOUR_OF_DAY) == todayCal.get(Calendar.HOUR_OF_DAY) &&
+                                targetCal.get(Calendar.MINUTE) == todayCal.get(Calendar.MINUTE)
+
+                        if (isSameDaySelected && !recurring) {
+                            // If the user selected the current minute, fire in 15 seconds rather than rolling to tomorrow
+                            targetCal.timeInMillis = now + 15_000L
                         } else {
-                            if (now - targetCal.timeInMillis < 60_000L) {
-                                targetCal.timeInMillis = now + 15_000L
-                            } else {
+                            while (targetCal.timeInMillis <= now) {
                                 targetCal.add(Calendar.DAY_OF_YEAR, 1)
                             }
                         }
@@ -760,82 +815,6 @@ fun AddReminderDialog(
         ) {
             DatePicker(state = datePickerState)
         }
-    }
-
-    if (showTimePicker) {
-        val pickerState = rememberTimePickerState(
-            initialHour = selectedHour24,
-            initialMinute = selectedMinute,
-            is24Hour = is24HourFormat
-        )
-
-        AlertDialog(
-            onDismissRequest = { showTimePicker = false },
-            title = {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (isTextInputMode) "Enter Time" else "Select Time",
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                    IconButton(
-                        onClick = { isTextInputMode = !isTextInputMode },
-                        modifier = Modifier.semantics {
-                            contentDescription = if (isTextInputMode) {
-                                "Switch to clock dial"
-                            } else {
-                                "Switch to text input"
-                            }
-                        }
-                    ) {
-                        Icon(
-                            imageVector = if (isTextInputMode) Icons.Default.Schedule else Icons.Default.Keyboard,
-                            contentDescription = null
-                        )
-                    }
-                }
-            },
-            text = {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState()),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    if (isTextInputMode) {
-                        TimeInput(state = pickerState)
-                    } else {
-                        TimePicker(state = pickerState)
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        selectedHour24 = pickerState.hour.coerceIn(0, 23)
-                        selectedMinute = pickerState.minute.coerceIn(0, 59)
-                        showTimePicker = false
-                    }
-                ) {
-                    Text("OK")
-                }
-            },
-            dismissButton = {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(
-                        onClick = { isTextInputMode = !isTextInputMode }
-                    ) {
-                        Text(if (isTextInputMode) "Clock Dial" else "Type Time")
-                    }
-                    TextButton(onClick = { showTimePicker = false }) {
-                        Text("Cancel")
-                    }
-                }
-            }
-        )
     }
 }
 
@@ -892,8 +871,7 @@ fun AddTimerDialog(
                     OutlinedTextField(
                         value = hoursInput,
                         onValueChange = { input ->
-                            val filtered = input.filter { it.isDigit() }.take(2)
-                            hoursInput = filtered
+                            hoursInput = input.filter { it.isDigit() }.take(2)
                             validationError = false
                         },
                         label = { Text("Hours (0-99)") },
@@ -907,8 +885,7 @@ fun AddTimerDialog(
                     OutlinedTextField(
                         value = minutesInput,
                         onValueChange = { input ->
-                            val filtered = input.filter { it.isDigit() }.take(2)
-                            minutesInput = filtered
+                            minutesInput = input.filter { it.isDigit() }.take(2)
                             validationError = false
                         },
                         label = { Text("Minutes (0-59)") },
@@ -922,8 +899,7 @@ fun AddTimerDialog(
                     OutlinedTextField(
                         value = secondsInput,
                         onValueChange = { input ->
-                            val filtered = input.filter { it.isDigit() }.take(2)
-                            secondsInput = filtered
+                            secondsInput = input.filter { it.isDigit() }.take(2)
                             validationError = false
                         },
                         label = { Text("Seconds (0-59)") },
@@ -937,7 +913,7 @@ fun AddTimerDialog(
 
                 if (validationError) {
                     Text(
-                        text = "Please enter a duration greater than 0 seconds (hours 0-99, minutes 0-59, seconds 0-59).",
+                        text = "Please enter a duration greater than 0 seconds.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error
                     )
@@ -964,7 +940,7 @@ fun AddTimerDialog(
                                 },
                                 modifier = Modifier
                                     .weight(1f)
-                                    .semantics { contentDescription = "Set timer to $presetLabel" },
+                                    .semantics { contentDescription = "Preset $presetLabel" },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
                             ) {
                                 Text(presetLabel, style = MaterialTheme.typography.labelMedium)
@@ -985,7 +961,7 @@ fun AddTimerDialog(
                                 },
                                 modifier = Modifier
                                     .weight(1f)
-                                    .semantics { contentDescription = "Set timer to $presetLabel" },
+                                    .semantics { contentDescription = "Preset $presetLabel" },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
                             ) {
                                 Text(presetLabel, style = MaterialTheme.typography.labelMedium)
@@ -1022,8 +998,10 @@ fun AddTimerDialog(
 
 @Composable
 fun SettingsDialog(
+    lastAlarmEvent: String,
     onDismiss: () -> Unit,
-    onOpenSetup: () -> Unit
+    onOpenSetup: () -> Unit,
+    onScheduleTestAlarm: () -> Unit
 ) {
     val context = LocalContext.current
 
@@ -1038,10 +1016,47 @@ fun SettingsDialog(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    text = "Review permission setup or open system settings for Spoken Reminders.",
+                    text = "Review permission setup, test screen-off speech, or open system settings.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                Button(
+                    onClick = onScheduleTestAlarm,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics {
+                            contentDescription = "Test alarm in 1 minute. Schedules a spoken test reminder 60 seconds from now so you can lock the screen and test."
+                        }
+                ) {
+                    Text("Test alarm in 1 minute")
+                }
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Last alarm event",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = lastAlarmEvent,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
 
                 Button(
                     onClick = {
