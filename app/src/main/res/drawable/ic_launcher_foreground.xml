@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- bell body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,30c-8,0 -14,6 -14,14v8c0,4 -2,7 -5,9l-2,2v3h42v-3l-2,-2c-3,-2 -5,-5 -5,-9v-8c0,-8 -6,-14 -14,-14z" />
+    <!-- clapper -->
+    <path
+        android:fillColor="#FFB300"
+        android:pathData="M54,76m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0" />
+    <!-- sound waves -->
+    <path
+        android:strokeColor="#FFB300"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M30,40c-3,4 -3,10 0,14" />
+    <path
+        android:strokeColor="#FFB300"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M78,40c3,4 3,10 0,14" />
+</vector>
