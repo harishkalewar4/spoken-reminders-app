@@ -89,7 +89,7 @@ fun SetupContent(
         hasExactAlarmPermission = PermissionStatusHelper.hasExactAlarmPermission(context)
         isIgnoringBatteryOptimizations = PermissionStatusHelper.isIgnoringBatteryOptimizations(context)
 
-        // If exact alarm permission was just granted, reschedule all active reminders and timers
+        // Reschedule existing reminders & timers whenever permissions are refreshed
         if (!prevExact && hasExactAlarmPermission) {
             ReminderRepository.getReminders(context).forEach { ReminderScheduler.schedule(context, it) }
             TimerRepository.getTimers(context).forEach { TimerScheduler.schedule(context, it) }
@@ -147,14 +147,14 @@ fun SetupContent(
                 )
             }
 
-            // Step 1: Battery Optimization (most critical for screen-off speech)
+            // Step 1: Battery Optimization
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 item {
                     PermissionCard(
                         title = "Step 1: Background Running (Unrestricted Battery)",
                         description = "Required so the system does not silence speech or block the alarm service when the screen is off.",
                         isGranted = isIgnoringBatteryOptimizations,
-                        buttonText = "Allow Background Running",
+                        buttonText = "Disable Battery Restrictions",
                         onClick = {
                             try {
                                 val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
@@ -174,7 +174,7 @@ fun SetupContent(
                 item {
                     PermissionCard(
                         title = "Step 2: Exact Alarms",
-                        description = "Required so your reminders and timers trigger at the exact scheduled minute even in deep sleep.",
+                        description = "Required so your reminders and timers trigger at the exact scheduled second even when the screen is off.",
                         isGranted = hasExactAlarmPermission,
                         buttonText = "Grant Exact Alarm Permission",
                         onClick = {
@@ -196,7 +196,7 @@ fun SetupContent(
                 item {
                     PermissionCard(
                         title = "Step 3: Notifications",
-                        description = "Required to run the spoken alert foreground service.",
+                        description = "Required to display ongoing alerts while reminders are spoken.",
                         isGranted = hasNotificationPermission,
                         buttonText = "Grant Notification Permission",
                         onClick = {
@@ -254,12 +254,12 @@ fun PermissionCard(
     buttonText: String,
     onClick: () -> Unit
 ) {
-    val statusText = if (isGranted) "Status: Completed" else "Status: Action Required"
+    val statusText = if (isGranted) "Completed" else "Action Required"
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .semantics(mergeDescendants = false) {
-                contentDescription = "$title. $statusText."
+            .semantics {
+                contentDescription = "$title, Status: $statusText"
             },
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant
@@ -285,7 +285,7 @@ fun PermissionCard(
                 )
                 Icon(
                     imageVector = if (isGranted) Icons.Default.CheckCircle else Icons.Default.Error,
-                    contentDescription = if (isGranted) "Granted" else "Action Required",
+                    contentDescription = if (isGranted) "Granted" else "Not Granted",
                     tint = if (isGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
                 )
             }
@@ -308,7 +308,7 @@ fun PermissionCard(
                 }
             } else {
                 Text(
-                    text = "Completed - Permission granted",
+                    text = "Permission granted",
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.SemiBold
