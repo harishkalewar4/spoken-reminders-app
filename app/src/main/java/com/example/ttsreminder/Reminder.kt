@@ -103,12 +103,16 @@ object ReminderScheduler {
         )
 
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !alarmManager.canScheduleExactAlarms()) {
-                alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    reminder.triggerTimeMillis,
-                    pendingIntent
-                )
+            val canExact = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                alarmManager.canScheduleExactAlarms()
+            } else {
+                true
+            }
+
+            if (canExact) {
+                // Use AlarmClock info if available for maximum reliability (shows alarm icon on status bar and bypasses Doze)
+                val alarmClockInfo = AlarmManager.AlarmClockInfo(reminder.triggerTimeMillis, pendingIntent)
+                alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
             } else {
                 alarmManager.setExactAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
@@ -143,7 +147,6 @@ object ReminderScheduler {
             set(Calendar.SECOND, 0)
             set(Calendar.MILLISECOND, 0)
         }
-        // If the selected time has already passed today, schedule it for tomorrow
         if (target.before(now) || target == now) {
             target.add(Calendar.DAY_OF_YEAR, 1)
         }
