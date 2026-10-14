@@ -1,3 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.ttsreminder">
+
 <!-- Permissions for scheduling exact alarms and speaking in the background -->
 <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
@@ -50,3 +54,5 @@
         android:foregroundServiceType="mediaPlayback" />
 
 </application>
+
+</manifest>
