@@ -1,8 +1,15 @@
 package com.example.ttsreminder
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.os.PowerManager
+import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 
 class ReminderReceiver : BroadcastReceiver() {
@@ -16,9 +23,92 @@ class ReminderReceiver : BroadcastReceiver() {
         const val EXTRA_LABEL = "extra_label"
         const val EXTRA_SPOKEN_TEXT = "extra_spoken_text"
         const val EXTRA_RECURRING = "extra_recurring"
+
+        private const val FALLBACK_CHANNEL_ID = "tts_reminder_alert_channel"
+        private const val FALLBACK_NOTIFICATION_ID = 1002
+
+        @Volatile
+        private var receiverWakeLock: PowerManager.WakeLock? = null
+
+        private fun acquireHandoverWakeLock(context: Context) {
+            try {
+                val pm = context.applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                val wl = receiverWakeLock ?: pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "SpokenReminders::ReceiverHandoverWakeLock"
+                ).apply {
+                    setReferenceCounted(false)
+                    receiverWakeLock = this
+                }
+                wl.acquire(30_000L)
+            } catch (t: Throwable) {
+                ReminderRepository.recordAlarmEvent(
+                    context,
+                    "receiver wakeLock FAILED: ${t.javaClass.simpleName}: ${t.message}"
+                )
+            }
+        }
+
+        fun postFallbackFullScreenNotification(
+            context: Context,
+            title: String,
+            contentText: String,
+            reasonNote: String
+        ) {
+            try {
+                val nm = context.getSystemService(NotificationManager::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val channel = NotificationChannel(
+                        FALLBACK_CHANNEL_ID,
+                        "Spoken Reminder Alerts",
+                        NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        description = "Speaks reminders and timers aloud using the system Text-to-Speech engine."
+                        setSound(null, null)
+                        lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                    }
+                    nm.createNotificationChannel(channel)
+                }
+
+                val fullScreenIntent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                val fullScreenPi = PendingIntent.getActivity(
+                    context,
+                    FALLBACK_NOTIFICATION_ID,
+                    fullScreenIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val notification = NotificationCompat.Builder(context, FALLBACK_CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+                    .setContentTitle(title)
+                    .setContentText(contentText)
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .setCategory(NotificationCompat.CATEGORY_ALARM)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setFullScreenIntent(fullScreenPi, true)
+                    .setContentIntent(fullScreenPi)
+                    .setAutoCancel(true)
+                    .build()
+
+                nm.notify(FALLBACK_NOTIFICATION_ID, notification)
+                ReminderRepository.recordAlarmEvent(
+                    context,
+                    "$reasonNote -> fallback full-screen notification posted"
+                )
+            } catch (t: Throwable) {
+                ReminderRepository.recordAlarmEvent(
+                    context,
+                    "$reasonNote -> fallback notif FAILED: ${t.javaClass.simpleName}: ${t.message}"
+                )
+            }
+        }
     }
 
     override fun onReceive(context: Context, intent: Intent) {
+        acquireHandoverWakeLock(context)
+
         when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED -> {
@@ -70,10 +160,18 @@ class ReminderReceiver : BroadcastReceiver() {
                             putExtra(EXTRA_CATEGORY, "General")
                             putExtra(EXTRA_SPOKEN_TEXT, combinedText)
                         }
-                        ContextCompat.startForegroundService(context, serviceIntent)
+                        startAlertServiceWithDiagnostics(
+                            context = context,
+                            serviceIntent = serviceIntent,
+                            alertTitle = "Missed Reminders & Timers",
+                            alertBody = combinedText
+                        )
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                } catch (t: Throwable) {
+                    ReminderRepository.recordAlarmEvent(
+                        context,
+                        "boot catch-up FAILED: ${t.javaClass.simpleName}: ${t.message}"
+                    )
                 }
             }
 
@@ -85,7 +183,6 @@ class ReminderReceiver : BroadcastReceiver() {
 
                 ReminderRepository.recordAlarmEvent(context, "alarm received ($title)")
 
-                // Start the foreground service FIRST (exact v1.0.1 behavior) so nothing can delay or block it
                 val spokenText = "$category reminder: $title. Again, $category reminder: $title."
                 val serviceIntent = Intent(context, TtsAlertService::class.java).apply {
                     putExtra(EXTRA_TITLE, title)
@@ -95,9 +192,14 @@ class ReminderReceiver : BroadcastReceiver() {
                         putExtra(EXTRA_ID, id)
                     }
                 }
-                ContextCompat.startForegroundService(context, serviceIntent)
 
-                // Handle recurring reschedule or non-recurring cleanup safely after starting service
+                startAlertServiceWithDiagnostics(
+                    context = context,
+                    serviceIntent = serviceIntent,
+                    alertTitle = "Reminder: $category",
+                    alertBody = title
+                )
+
                 if (id != -1) {
                     try {
                         if (recurring) {
@@ -113,11 +215,10 @@ class ReminderReceiver : BroadcastReceiver() {
                                 ReminderRepository.updateReminder(context, updated)
                             }
                         } else {
-                            // Remove from stored list without calling alarmManager.cancel on the currently firing alarm
                             ReminderRepository.removeReminderRecordOnly(context, id)
                         }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+                    } catch (t: Throwable) {
+                        t.printStackTrace()
                     }
                 }
             }
@@ -143,15 +244,47 @@ class ReminderReceiver : BroadcastReceiver() {
                     putExtra(EXTRA_CATEGORY, "Timer")
                     putExtra(EXTRA_SPOKEN_TEXT, spokenText)
                 }
-                ContextCompat.startForegroundService(context, serviceIntent)
+
+                startAlertServiceWithDiagnostics(
+                    context = context,
+                    serviceIntent = serviceIntent,
+                    alertTitle = "Timer Finished",
+                    alertBody = notifTitle
+                )
 
                 if (id != -1) {
                     try {
                         TimerRepository.removeTimerRecordOnly(context, id)
-                    } catch (e: Exception) {
-                        e.printStackTrace()
+                    } catch (t: Throwable) {
+                        t.printStackTrace()
                     }
                 }
+            }
+        }
+    }
+
+    private fun startAlertServiceWithDiagnostics(
+        context: Context,
+        serviceIntent: Intent,
+        alertTitle: String,
+        alertBody: String
+    ) {
+        try {
+            ContextCompat.startForegroundService(context, serviceIntent)
+            ReminderRepository.recordAlarmEvent(context, "alarm received -> startForegroundService requested")
+        } catch (t: Throwable) {
+            val failNote = "start service FAILED: ${t.javaClass.simpleName}: ${t.message}"
+            ReminderRepository.recordAlarmEvent(context, failNote)
+            postFallbackFullScreenNotification(
+                context = context,
+                title = alertTitle,
+                contentText = alertBody,
+                reasonNote = failNote
+            )
+            // Also try plain startService while holding the receiver wake lock
+            try {
+                context.startService(serviceIntent)
+            } catch (ignored: Throwable) {
             }
         }
     }
