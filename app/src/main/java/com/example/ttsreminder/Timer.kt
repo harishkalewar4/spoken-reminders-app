@@ -16,7 +16,7 @@ data class TimerItem(
 )
 
 object TimerRepository {
-    private const val PREFS_NAME = "tts_timers_prefs"
+    const val PREFS_NAME = "tts_timers_prefs"
     private const val KEY_TIMERS = "timers_json"
 
     fun getTimers(context: Context): List<TimerItem> {
@@ -41,6 +41,7 @@ object TimerRepository {
 
     fun addTimer(context: Context, timer: TimerItem) {
         val current = getTimers(context).toMutableList()
+        current.removeAll { it.id == timer.id }
         current.add(timer)
         saveAll(context, current)
         TimerScheduler.schedule(context, timer)
@@ -70,7 +71,7 @@ object TimerRepository {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_TIMERS, jsonArray.toString())
-            .apply()
+            .commit()
     }
 }
 
@@ -81,14 +82,25 @@ object TimerScheduler {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             action = ReminderReceiver.ACTION_TRIGGER_TIMER
+            addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
             putExtra(ReminderReceiver.EXTRA_ID, timer.id)
             putExtra(ReminderReceiver.EXTRA_LABEL, timer.label)
         }
 
-        val pendingIntent = PendingIntent.getBroadcast(
+        val operationPi = PendingIntent.getBroadcast(
             context,
             timer.id,
             intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val showActivityIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val showActivityPi = PendingIntent.getActivity(
+            context,
+            timer.id,
+            showActivityIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
@@ -100,17 +112,25 @@ object TimerScheduler {
             }
 
             if (canExact) {
-                val alarmClockInfo = AlarmManager.AlarmClockInfo(timer.endTimeMillis, pendingIntent)
-                alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
+                val alarmClockInfo = AlarmManager.AlarmClockInfo(timer.endTimeMillis, showActivityPi)
+                alarmManager.setAlarmClock(alarmClockInfo, operationPi)
             } else {
-                alarmManager.setExactAndAllowWhileIdle(
+                alarmManager.setAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     timer.endTimeMillis,
-                    pendingIntent
+                    operationPi
                 )
             }
         } catch (e: SecurityException) {
-            alarmManager.set(AlarmManager.RTC_WAKEUP, timer.endTimeMillis, pendingIntent)
+            try {
+                alarmManager.setAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    timer.endTimeMillis,
+                    operationPi
+                )
+            } catch (ignored: Exception) {
+                alarmManager.set(AlarmManager.RTC_WAKEUP, timer.endTimeMillis, operationPi)
+            }
         }
     }
 
@@ -118,6 +138,7 @@ object TimerScheduler {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             action = ReminderReceiver.ACTION_TRIGGER_TIMER
+            addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context,
