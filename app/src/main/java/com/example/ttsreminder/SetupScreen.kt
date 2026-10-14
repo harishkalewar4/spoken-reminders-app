@@ -29,233 +29,231 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 
 @Composable
 fun SetupContent(
-onFinishedOrSkipped: () -> Unit,
-showContinueButton: Boolean
+    onFinishedOrSkipped: () -> Unit,
+    showContinueButton: Boolean
 ) {
-val context = LocalContext.current
+    val context = LocalContext.current
 
-var hasNotificationPermission by remember { mutableStateOf(true) }
-var hasExactAlarmPermission by remember { mutableStateOf(true) }
-var isIgnoringBattery by remember { mutableStateOf(true) }
+    var hasNotificationPermission by remember { mutableStateOf(true) }
+    var hasExactAlarmPermission by remember { mutableStateOf(true) }
+    var isIgnoringBatteryOptimizations by remember { mutableStateOf(true) }
 
-fun refreshStatus() {
-    hasNotificationPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-    } else {
-        true
+    fun checkPermissions() {
+        hasNotificationPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
+        hasExactAlarmPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            alarmManager.canScheduleExactAlarms()
+        } else {
+            true
+        }
+
+        isIgnoringBatteryOptimizations = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+            pm.isIgnoringBatteryOptimizations(context.packageName)
+        } else {
+            true
+        }
     }
 
-    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-    hasExactAlarmPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        alarmManager.canScheduleExactAlarms()
-    } else {
-        true
+    LifecycleResumeEffect(Unit) {
+        checkPermissions()
+        onPauseOrDispose {}
     }
 
-    val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-    isIgnoringBattery = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-        powerManager.isIgnoringBatteryOptimizations(context.packageName)
-    } else {
-        true
-    }
-}
-
-LifecycleResumeEffect(Unit) {
-    refreshStatus()
-    onPauseOrDispose {}
-}
-
-LazyColumn(
-    modifier = Modifier
-        .fillMaxSize()
-        .padding(16.dp),
-    verticalArrangement = Arrangement.spacedBy(16.dp),
-    contentPadding = PaddingValues(bottom = 24.dp)
-) {
-    item {
-        Text(
-            text = "Welcome to Spoken Reminders",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.semantics { heading() }
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "To make sure your reminders and timers speak reliably even when your phone is locked, please complete these 3 quick setup steps:",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-
-    // Step 1: Notifications
-    item {
-        SetupCard(
-            stepNumber = 1,
-            title = "Allow Notifications",
-            description = "Permits alerts to show an active notification when spoken reminders or timers trigger.",
-            isDone = hasNotificationPermission,
-            doneText = "Done",
-            neededText = "Allow Notifications",
-            onAction = {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                    }
-                    context.startActivity(intent)
-                }
-            }
-        )
-    }
-
-    // Step 2: Alarms & Reminders
-    item {
-        SetupCard(
-            stepNumber = 2,
-            title = "Allow Alarms & Reminders",
-            description = "Grants exact alarm permissions so your reminders and timers fire precisely on time.",
-            isDone = hasExactAlarmPermission,
-            doneText = "Done",
-            neededText = "Allow Alarms",
-            onAction = {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-                        data = Uri.parse("package:${context.packageName}")
-                    }
-                    context.startActivity(intent)
-                }
-            }
-        )
-    }
-
-    // Step 3: Background Activity
-    item {
-        SetupCard(
-            stepNumber = 3,
-            title = "Keep App Running in Background",
-            description = "Exempts the app from battery optimizations so alerts won't be silenced when the screen is locked.",
-            isDone = isIgnoringBattery,
-            doneText = "Done",
-            neededText = "Disable Battery Restrictions",
-            onAction = {
-                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                }
-                context.startActivity(intent)
-            }
-        )
-    }
-
-    item {
-        OutlinedButton(
-            onClick = {
-                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.parse("package:${context.packageName}")
-                }
-                context.startActivity(intent)
-            },
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        LazyColumn(
             modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 48.dp)
+                .fillMaxSize()
+                .padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalAlignment = Alignment.Start
         ) {
-            Text("Open Phone Settings for this App")
-        }
-    }
+            item {
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = "Initial Setup",
+                    style = MaterialTheme.typography.headlineLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.semantics { heading() }
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "To ensure alarms fire precisely on time and your reminders are spoken aloud reliably in the background, please grant the following permissions.",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+            }
 
-    if (showContinueButton) {
-        item {
-            Spacer(modifier = Modifier.height(8.dp))
-            Button(
-                onClick = { onFinishedOrSkipped() },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 52.dp)
-            ) {
-                Text(if (hasNotificationPermission && hasExactAlarmPermission && isIgnoringBattery) "Continue to App" else "Skip for Now")
+            // Notification Permission
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                item {
+                    PermissionCard(
+                        title = "Notifications",
+                        description = "Required to display ongoing alerts while reminders are spoken.",
+                        isGranted = hasNotificationPermission,
+                        buttonText = "Grant Notification Permission",
+                        onClick = {
+                            try {
+                                val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                }
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                openAppSettingsFallback(context)
+                            }
+                        }
+                    )
+                }
+            }
+
+            // Exact Alarm Permission
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                item {
+                    PermissionCard(
+                        title = "Exact Alarms",
+                        description = "Required so your reminders and timers trigger precisely at the scheduled second.",
+                        isGranted = hasExactAlarmPermission,
+                        buttonText = "Grant Exact Alarm Permission",
+                        onClick = {
+                            try {
+                                val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                openAppSettingsFallback(context)
+                            }
+                        }
+                    )
+                }
+            }
+
+            // Battery Optimization
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                item {
+                    PermissionCard(
+                        title = "Background Running",
+                        description = "Ensures background services and alarms are not delayed or killed while the screen is off.",
+                        isGranted = isIgnoringBatteryOptimizations,
+                        buttonText = "Disable Battery Restrictions",
+                        onClick = {
+                            try {
+                                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                                context.startActivity(intent)
+                            } catch (e: Exception) {
+                                openAppSettingsFallback(context)
+                            }
+                        }
+                    )
+                }
+            }
+
+            if (showContinueButton) {
+                item {
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Button(
+                        onClick = onFinishedOrSkipped,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Text(text = "Continue to Reminders", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+            }
+
+            item {
+                Spacer(modifier = Modifier.height(32.dp))
             }
         }
     }
 }
 
-
+private fun openAppSettingsFallback(context: Context) {
+    try {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.parse("package:${context.packageName}")
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        val intent = Intent(Settings.ACTION_SETTINGS)
+        context.startActivity(intent)
+    }
 }
 
 @Composable
-fun SetupCard(
-stepNumber: Int,
-title: String,
-description: String,
-isDone: Boolean,
-doneText: String,
-neededText: String,
-onAction: () -> Unit
+fun PermissionCard(
+    title: String,
+    description: String,
+    isGranted: Boolean,
+    buttonText: String,
+    onClick: () -> Unit
 ) {
-Card(
-colors = CardDefaults.cardColors(
-containerColor = if (isDone) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-else MaterialTheme.colorScheme.surfaceVariant
-),
-modifier = Modifier.fillMaxWidth()
-) {
-Column(
-modifier = Modifier
-.fillMaxWidth()
-.padding(16.dp),
-verticalArrangement = Arrangement.spacedBy(10.dp)
-) {
-Row(
-modifier = Modifier.fillMaxWidth(),
-horizontalArrangement = Arrangement.SpaceBetween,
-verticalAlignment = Alignment.CenterVertically
-) {
-Text(
-text = "Step $stepNumber: $title",
-style = MaterialTheme.typography.titleMedium,
-fontWeight = FontWeight.Bold,
-modifier = Modifier.semantics { heading() }
-)
-Surface(
-shape = MaterialTheme.shapes.small,
-color = if (isDone) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.tertiaryContainer
-) {
-Row(
-modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-verticalAlignment = Alignment.CenterVertically,
-horizontalArrangement = Arrangement.spacedBy(4.dp)
-) {
-Icon(
-imageVector = if (isDone) Icons.Default.CheckCircle else Icons.Default.Error,
-contentDescription = null,
-tint = if (isDone) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onTertiaryContainer,
-modifier = Modifier.size(16.dp)
-)
-Text(
-text = if (isDone) "Done" else "Needed",
-style = MaterialTheme.typography.labelMedium,
-color = if (isDone) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onTertiaryContainer
-)
-}
-}
-}
-
-        Text(
-            text = description,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
-
-        if (!isDone) {
-            Button(
-                onClick = onAction,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-                    .semantics { contentDescription = "$neededText, Step $stepNumber" }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(neededText)
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Icon(
+                    imageVector = if (isGranted) Icons.Default.CheckCircle else Icons.Default.Error,
+                    contentDescription = if (isGranted) "Granted" else "Not Granted",
+                    tint = if (isGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary
+                )
+            }
+
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            if (!isGranted) {
+                Button(
+                    onClick = onClick,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Text(text = buttonText)
+                }
+            } else {
+                Text(
+                    text = "Permission granted",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold
+                )
             }
         }
     }
-}
-
-
 }
