@@ -656,7 +656,7 @@ fun AddReminderDialog(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fn AddTimerDialog(
+fun AddTimerDialog(
     onDismiss: () -> Unit,
     onSave: (label: String, durationMillis: Long) -> Unit
 ) {
