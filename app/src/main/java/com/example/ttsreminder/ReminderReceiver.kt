@@ -17,7 +17,6 @@ class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
             Intent.ACTION_BOOT_COMPLETED -> {
-                // Re-schedule all upcoming reminders after device reboot
                 val now = System.currentTimeMillis()
                 ReminderRepository.getReminders(context).forEach { reminder ->
                     if (reminder.triggerTimeMillis > now) {
@@ -31,12 +30,10 @@ class ReminderReceiver : BroadcastReceiver() {
                 val title = intent.getStringExtra(EXTRA_TITLE) ?: "You have a scheduled reminder."
                 val category = intent.getStringExtra(EXTRA_CATEGORY) ?: "General"
 
-                // Remove the fired one-time reminder from active storage
                 if (id != -1) {
                     ReminderRepository.deleteReminder(context, id)
                 }
 
-                // Start the Foreground Service that speaks via Android's default TTS engine
                 val serviceIntent = Intent(context, TtsAlertService::class.java).apply {
                     putExtra(EXTRA_TITLE, title)
                     putExtra(EXTRA_CATEGORY, category)
