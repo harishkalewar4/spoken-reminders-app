@@ -29,8 +29,7 @@
 
         <activity
             android:name=".MainActivity"
-            android:exported="true"
-            android:launchMode="singleTop">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -40,11 +39,9 @@
         <receiver
             android:name=".ReminderReceiver"
             android:enabled="true"
-            android:exported="true"
-            android:directBootAware="true">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
                 <action android:name="com.example.ttsreminder.ACTION_TRIGGER_REMINDER" />
                 <action android:name="com.example.ttsreminder.ACTION_TRIGGER_TIMER" />
@@ -55,7 +52,6 @@
             android:name=".TtsAlertService"
             android:enabled="true"
             android:exported="false"
-            android:directBootAware="true"
             android:foregroundServiceType="mediaPlayback" />
 
     </application>
