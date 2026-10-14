@@ -495,7 +495,7 @@ fun TimerCard(timer: TimerItem, onDelete: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fn AddReminderDialog(
+fun AddReminderDialog(
     onDismiss: () -> Unit,
     onSave: (title: String, category: String, triggerTimeMillis: Long, recurring: Boolean) -> Unit
 ) {
