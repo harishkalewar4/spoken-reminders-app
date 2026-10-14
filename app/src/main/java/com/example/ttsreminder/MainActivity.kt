@@ -1,16 +1,19 @@
 package com.example.ttsreminder
 
 import android.Manifest
+import android.app.AlarmManager
 import android.app.TimePickerDialog
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.view.View
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -33,7 +36,7 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* Permission result handled gracefully */ }
+    ) { /* Handled gracefully */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,6 +52,10 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
     }
 
     private fun requestPermissionsIfNeeded() {
@@ -92,6 +99,27 @@ fun ReminderAppScreen() {
         String.format(Locale.getDefault(), "%02d:%02d %s", hour12, selectedMinute, amPm)
     }
 
+    // Permission status checks
+    val hasNotificationPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+    } else {
+        true
+    }
+
+    val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    val hasExactAlarmPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        alarmManager.canScheduleExactAlarms()
+    } else {
+        true
+    }
+
+    val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    val isIgnoringBatteryOptimizations = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        powerManager.isIgnoringBatteryOptimizations(context.packageName)
+    } else {
+        true
+    }
+
     fun triggerTtsSpeechNow(title: String, category: String) {
         val serviceIntent = Intent(context, TtsAlertService::class.java).apply {
             putExtra(ReminderReceiver.EXTRA_TITLE, title)
@@ -120,6 +148,122 @@ fun ReminderAppScreen() {
             verticalArrangement = Arrangement.spacedBy(16.dp),
             contentPadding = PaddingValues(vertical = 16.dp)
         ) {
+            // SETUP CHECKLIST SECTION FOR OXYGENOS / ANDROID 14
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    ),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "OxygenOS Setup Checklist",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.semantics { heading() }
+                        )
+                        Text(
+                            text = "To ensure reminders speak with the screen OFF, verify and fix any missing permissions below:",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+
+                        // 1. Notifications
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "• Notifications: ${if (hasNotificationPermission) "Allowed" else "Missing"}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (hasNotificationPermission) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            )
+                            if (!hasNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                Button(onClick = {
+                                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                                    }
+                                    context.startActivity(intent)
+                                }) {
+                                    Text("Fix")
+                                }
+                            }
+                        }
+
+                        // 2. Exact Alarms
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "• Exact Alarms: ${if (hasExactAlarmPermission) "Allowed" else "Restricted"}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (hasExactAlarmPermission) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            )
+                            if (!hasExactAlarmPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                                Button(onClick = {
+                                    val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                                        data = Uri.parse("package:${context.packageName}")
+                                    }
+                                    context.startActivity(intent)
+                                }) {
+                                    Text("Fix")
+                                }
+                            }
+                        }
+
+                        // 3. Battery Optimization
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "• Battery Optimization: ${if (isIgnoringBatteryOptimizations) "Unrestricted" else "Optimized"}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (isIgnoringBatteryOptimizations) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                            )
+                            if (!isIgnoringBatteryOptimizations) {
+                                Button(onClick = {
+                                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                        data = Uri.parse("package:${context.packageName}")
+                                    }
+                                    context.startActivity(intent)
+                                }) {
+                                    Text("Fix")
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "OxygenOS Tip: Long-press app icon -> App info -> Battery -> Set to 'Unrestricted' and enable 'Allow background activity' / 'Auto-launch'.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.outline
+                        )
+
+                        OutlinedButton(
+                            onClick = {
+                                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                                context.startActivity(intent)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Open App Settings")
+                        }
+                    }
+                }
+            }
+
             // SECTION 1: Create New Reminder
             item {
                 Text(
@@ -165,7 +309,7 @@ fun ReminderAppScreen() {
                             ) {
                                 RadioButton(
                                     selected = (category == selectedCategory),
-                                    onClick = null // Handled by parent Row for a larger touch target
+                                    onClick = null
                                 )
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Text(
@@ -303,57 +447,60 @@ fun ReminderItemCard(
     onSpeakNow: () -> Unit,
     onDelete: () -> Unit
 ) {
-    ElevatedCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .semantics(mergeDescendants = true) {
-                contentDescription =
-                    "${reminder.category} reminder: ${reminder.title}. Scheduled for ${reminder.formattedTime()}."
-                customActions = listOf(
-                    CustomAccessibilityAction("Speak reminder aloud now") {
-                        onSpeakNow()
-                        true
-                    },
-                    CustomAccessibilityAction("Delete reminder") {
-                        onDelete()
-                        true
-                    }
-                )
-            }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(16.dp)
         ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = reminder.category,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = reminder.formattedTime(),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "${reminder.category}: ${reminder.title}",
-                style = MaterialTheme.typography.titleMedium,
+                text = reminder.title,
+                style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.SemiBold
             )
-            Text(
-                text = "Scheduled for ${reminder.formattedTime()}",
-                style = MaterialTheme.typography.bodyMedium
-            )
+            Spacer(modifier = Modifier.height(12.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically
+                spacedBy(8.dp)
             ) {
-                TextButton(
+                OutlinedButton(
                     onClick = onSpeakNow,
                     modifier = Modifier.semantics {
-                        contentDescription = "Speak ${reminder.title} aloud now"
+                        contentDescription = "Test speak reminder: ${reminder.title}"
                     }
                 ) {
                     Text("Speak Now")
                 }
-                Spacer(modifier = Modifier.width(8.dp))
-                TextButton(
+                Button(
                     onClick = onDelete,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    ),
                     modifier = Modifier.semantics {
-                        contentDescription = "Delete reminder ${reminder.title}"
+                        contentDescription = "Delete reminder: ${reminder.title}"
                     }
                 ) {
                     Text("Delete")
