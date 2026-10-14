@@ -23,9 +23,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -71,17 +74,22 @@ fun MainAppScreen() {
     var showAddReminderDialog by remember { mutableStateOf(false) }
     var showAddTimerDialog by remember { mutableStateOf(false) }
 
+    var nowMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var remindersList by remember { mutableStateOf(ReminderRepository.getReminders(context)) }
-    var timersList by remember { mutableStateOf(TimerRepository.getTimers(context)) }
+    var storedTimers by remember { mutableStateOf(TimerRepository.getTimers(context)) }
+    // Keep track of timers in memory briefly after they hit 0 so the card can show "Finished" for a few seconds
+    // even after ReminderReceiver removes the record from SharedPreferences.
+    var recentlyFinishedTimers by remember { mutableStateOf<Map<Int, TimerItem>>(emptyMap()) }
     var lastAlarmEvent by remember { mutableStateOf(ReminderRepository.getLastAlarmEvent(context)) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
     LifecycleResumeEffect(Unit) {
+        nowMillis = System.currentTimeMillis()
         allPermissionsGranted = PermissionStatusHelper.areAllCriticalPermissionsGranted(context)
         remindersList = ReminderRepository.getReminders(context)
-        timersList = TimerRepository.getTimers(context)
+        storedTimers = TimerRepository.getTimers(context)
         lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
         onPauseOrDispose {}
     }
@@ -92,8 +100,9 @@ fun MainAppScreen() {
         val prefsTimers = context.getSharedPreferences(TimerRepository.PREFS_NAME, Context.MODE_PRIVATE)
 
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            nowMillis = System.currentTimeMillis()
             remindersList = ReminderRepository.getReminders(context)
-            timersList = TimerRepository.getTimers(context)
+            storedTimers = TimerRepository.getTimers(context)
             lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
         }
         prefsReminders.registerOnSharedPreferenceChangeListener(listener)
@@ -108,10 +117,46 @@ fun MainAppScreen() {
     LaunchedEffect(Unit) {
         while (isActive) {
             delay(1000L)
+            val currentNow = System.currentTimeMillis()
+            nowMillis = currentNow
+
+            val currentStored = TimerRepository.getTimers(context)
+            // Capture any timer that is within its 3-second post-finish window so it still displays "Finished"
+            val updatedRecent = recentlyFinishedTimers.toMutableMap()
+            currentStored.forEach { t ->
+                if (currentNow >= t.endTimeMillis - 1000L && currentNow - t.endTimeMillis < 3500L) {
+                    updatedRecent[t.id] = t
+                }
+            }
+            // Purge finished timers from the temporary display map and repository once 3.5 seconds have passed after 00:00
+            val expiredIds = updatedRecent.values
+                .filter { currentNow - it.endTimeMillis >= 3500L }
+                .map { it.id }
+            expiredIds.forEach { id -> updatedRecent.remove(id) }
+
+            currentStored.forEach { t ->
+                if (currentNow - t.endTimeMillis >= 3500L) {
+                    TimerRepository.removeTimerRecordOnly(context, t.id)
+                }
+            }
+
+            recentlyFinishedTimers = updatedRecent
             remindersList = ReminderRepository.getReminders(context)
-            timersList = TimerRepository.getTimers(context)
+            storedTimers = TimerRepository.getTimers(context)
             lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
         }
+    }
+
+    // Merge stored active timers with any timer still in its brief "Finished" display window
+    val timersList = remember(storedTimers, recentlyFinishedTimers, nowMillis) {
+        val map = LinkedHashMap<Int, TimerItem>()
+        storedTimers.forEach { map[it.id] = it }
+        recentlyFinishedTimers.forEach { (id, item) ->
+            if (nowMillis - item.endTimeMillis < 3500L) {
+                map[id] = item
+            }
+        }
+        map.values.sortedBy { it.endTimeMillis }
     }
 
     Scaffold(
@@ -252,16 +297,23 @@ fun MainAppScreen() {
                     } else {
                         TimersScreen(
                             timers = timersList,
+                            nowMillis = nowMillis,
                             onAddClick = { showAddTimerDialog = true },
                             onDelete = { timer ->
+                                recentlyFinishedTimers = recentlyFinishedTimers - timer.id
                                 TimerRepository.deleteTimer(context, timer.id)
+                                storedTimers = TimerRepository.getTimers(context)
                                 scope.launch {
                                     val result = snackbarHostState.showSnackbar(
                                         message = "Timer deleted",
                                         actionLabel = "Undo"
                                     )
                                     if (result == SnackbarResult.ActionPerformed) {
-                                        TimerRepository.addTimer(context, timer)
+                                        val now = System.currentTimeMillis()
+                                        if (timer.endTimeMillis > now) {
+                                            TimerRepository.addTimer(context, timer)
+                                            storedTimers = TimerRepository.getTimers(context)
+                                        }
                                     }
                                 }
                             }
@@ -325,14 +377,16 @@ fun MainAppScreen() {
         AddTimerDialog(
             onDismiss = { showAddTimerDialog = false },
             onSave = { label, durationMillis ->
+                val currentNow = System.currentTimeMillis()
                 val newTimer = TimerItem(
                     id = Random.nextInt(500000, 999999),
                     label = label,
                     durationMillis = durationMillis,
-                    endTimeMillis = System.currentTimeMillis() + durationMillis
+                    endTimeMillis = currentNow + durationMillis
                 )
+                nowMillis = currentNow
                 TimerRepository.addTimer(context, newTimer)
-                timersList = TimerRepository.getTimers(context)
+                storedTimers = TimerRepository.getTimers(context)
                 lastAlarmEvent = ReminderRepository.getLastAlarmEvent(context)
                 showAddTimerDialog = false
             }
@@ -501,6 +555,7 @@ fun ReminderCard(
 @Composable
 fun TimersScreen(
     timers: List<TimerItem>,
+    nowMillis: Long,
     onAddClick: () -> Unit,
     onDelete: (TimerItem) -> Unit
 ) {
@@ -547,7 +602,11 @@ fun TimersScreen(
                 )
             }
             items(timers, key = { it.id }) { timer ->
-                TimerCard(timer = timer, onDelete = { onDelete(timer) })
+                TimerCard(
+                    timer = timer,
+                    nowMillis = nowMillis,
+                    onDelete = { onDelete(timer) }
+                )
             }
             item { Spacer(modifier = Modifier.height(80.dp)) }
         }
@@ -555,9 +614,16 @@ fun TimersScreen(
 }
 
 @Composable
-fun TimerCard(timer: TimerItem, onDelete: () -> Unit) {
-    val remainingMillis = (timer.endTimeMillis - System.currentTimeMillis()).coerceAtLeast(0L)
-    val secondsTotal = remainingMillis / 1000L
+fun TimerCard(
+    timer: TimerItem,
+    nowMillis: Long,
+    onDelete: () -> Unit
+) {
+    val remainingMillis = (timer.endTimeMillis - nowMillis).coerceAtLeast(0L)
+    // Round up to the nearest whole second so a newly added 05:00 timer starts cleanly at 05:00 and counts down every second
+    val secondsTotal = if (remainingMillis > 0L) (remainingMillis + 999L) / 1000L else 0L
+    val isFinished = secondsTotal <= 0L
+
     val hours = secondsTotal / 3600L
     val minutes = (secondsTotal % 3600L) / 60L
     val seconds = secondsTotal % 60L
@@ -565,6 +631,17 @@ fun TimerCard(timer: TimerItem, onDelete: () -> Unit) {
         String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds)
     } else {
         String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+    }
+
+    // Coarse minute-granularity description so TalkBack never chatters every second
+    val roundedMinutes = (secondsTotal + 59L) / 60L
+    val stableA11yDescription = remember(timer.label, isFinished, roundedMinutes) {
+        val prefix = if (timer.label.isNotEmpty()) "${timer.label}. " else "Timer. "
+        when {
+            isFinished -> "${prefix}Finished"
+            roundedMinutes <= 1L -> "${prefix}Less than 1 minute remaining"
+            else -> "${prefix}About $roundedMinutes minutes remaining"
+        }
     }
 
     Card(
@@ -578,7 +655,17 @@ fun TimerCard(timer: TimerItem, onDelete: () -> Unit) {
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clearAndSetSemantics {
+                        contentDescription = stableA11yDescription
+                        if (isFinished) {
+                            liveRegion = LiveRegionMode.Polite
+                        }
+                    },
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 if (timer.label.isNotEmpty()) {
                     Text(
                         text = timer.label,
@@ -588,7 +675,7 @@ fun TimerCard(timer: TimerItem, onDelete: () -> Unit) {
                     )
                 }
                 Text(
-                    text = if (remainingMillis > 0) "Time remaining: $timeFormatted" else "Finished",
+                    text = if (!isFinished) "Time remaining: $timeFormatted" else "Finished",
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.SemiBold
