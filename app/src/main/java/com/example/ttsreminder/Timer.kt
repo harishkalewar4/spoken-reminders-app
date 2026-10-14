@@ -7,6 +7,9 @@ import android.content.Intent
 import android.os.Build
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 data class TimerItem(
     val id: Int,
@@ -57,6 +60,14 @@ object TimerRepository {
         }
     }
 
+    fun removeTimerRecordOnly(context: Context, timerId: Int) {
+        val current = getTimers(context).toMutableList()
+        val removed = current.removeAll { it.id == timerId }
+        if (removed) {
+            saveAll(context, current)
+        }
+    }
+
     internal fun saveAll(context: Context, list: List<TimerItem>) {
         val jsonArray = JSONArray()
         list.forEach { item ->
@@ -71,7 +82,7 @@ object TimerRepository {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_TIMERS, jsonArray.toString())
-            .commit()
+            .apply()
     }
 }
 
@@ -82,27 +93,18 @@ object TimerScheduler {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             action = ReminderReceiver.ACTION_TRIGGER_TIMER
-            addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
             putExtra(ReminderReceiver.EXTRA_ID, timer.id)
             putExtra(ReminderReceiver.EXTRA_LABEL, timer.label)
         }
 
-        val operationPi = PendingIntent.getBroadcast(
+        val pendingIntent = PendingIntent.getBroadcast(
             context,
             timer.id,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val showActivityIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val showActivityPi = PendingIntent.getActivity(
-            context,
-            timer.id,
-            showActivityIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val timeFormatted = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(timer.endTimeMillis))
 
         try {
             val canExact = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -112,25 +114,25 @@ object TimerScheduler {
             }
 
             if (canExact) {
-                val alarmClockInfo = AlarmManager.AlarmClockInfo(timer.endTimeMillis, showActivityPi)
-                alarmManager.setAlarmClock(alarmClockInfo, operationPi)
+                val alarmClockInfo = AlarmManager.AlarmClockInfo(timer.endTimeMillis, pendingIntent)
+                alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
+                ReminderRepository.recordAlarmEvent(
+                    context,
+                    "Scheduled exact Timer '${timer.label.ifEmpty { "Timer" }}' for $timeFormatted"
+                )
             } else {
-                alarmManager.setAndAllowWhileIdle(
+                alarmManager.setExactAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     timer.endTimeMillis,
-                    operationPi
+                    pendingIntent
+                )
+                ReminderRepository.recordAlarmEvent(
+                    context,
+                    "Scheduled allowWhileIdle Timer for $timeFormatted"
                 )
             }
         } catch (e: SecurityException) {
-            try {
-                alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    timer.endTimeMillis,
-                    operationPi
-                )
-            } catch (ignored: Exception) {
-                alarmManager.set(AlarmManager.RTC_WAKEUP, timer.endTimeMillis, operationPi)
-            }
+            alarmManager.set(AlarmManager.RTC_WAKEUP, timer.endTimeMillis, pendingIntent)
         }
     }
 
@@ -138,7 +140,6 @@ object TimerScheduler {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             action = ReminderReceiver.ACTION_TRIGGER_TIMER
-            addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context,
