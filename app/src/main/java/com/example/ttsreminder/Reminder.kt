@@ -20,7 +20,7 @@ data class Reminder(
     val recurring: Boolean = false
 ) {
     fun formattedTime(): String {
-        val sdf = SimpleDateFormat("hh:mm a, MMM dd", Locale.getDefault())
+        val sdf = SimpleDateFormat("hh:mm:ss a, MMM dd", Locale.getDefault())
         return sdf.format(Date(triggerTimeMillis))
     }
 }
@@ -28,7 +28,8 @@ data class Reminder(
 object ReminderRepository {
     const val PREFS_NAME = "tts_reminders_prefs"
     private const val KEY_REMINDERS = "reminders_json"
-    private const val KEY_SETUP_DONE = "setup_completed_v1"
+    private const val KEY_SETUP_DONE = "setup_completed_v2"
+    private const val KEY_LAST_ALARM_EVENT = "last_alarm_event"
 
     fun isSetupCompleted(context: Context): Boolean {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -40,6 +41,25 @@ object ReminderRepository {
             .edit()
             .putBoolean(KEY_SETUP_DONE, completed)
             .apply()
+    }
+
+    fun recordAlarmEvent(context: Context, eventNote: String) {
+        try {
+            val timestamp = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date())
+            val entry = "$timestamp - $eventNote"
+            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_LAST_ALARM_EVENT, entry)
+                .commit()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    fun getLastAlarmEvent(context: Context): String {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getString(KEY_LAST_ALARM_EVENT, "No alarm events recorded yet.")
+            ?: "No alarm events recorded yet."
     }
 
     fun getReminders(context: Context): List<Reminder> {
@@ -75,7 +95,6 @@ object ReminderRepository {
         val current = getReminders(context).toMutableList()
         val index = current.indexOfFirst { it.id == reminder.id }
         if (index != -1) {
-            ReminderScheduler.cancel(context, current[index])
             current[index] = reminder
             saveAll(context, current)
             ReminderScheduler.schedule(context, reminder)
@@ -88,6 +107,14 @@ object ReminderRepository {
         if (toRemove != null) {
             ReminderScheduler.cancel(context, toRemove)
             current.remove(toRemove)
+            saveAll(context, current)
+        }
+    }
+
+    fun removeReminderRecordOnly(context: Context, reminderId: Int) {
+        val current = getReminders(context).toMutableList()
+        val removed = current.removeAll { it.id == reminderId }
+        if (removed) {
             saveAll(context, current)
         }
     }
@@ -107,50 +134,39 @@ object ReminderRepository {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString(KEY_REMINDERS, jsonArray.toString())
-            .commit()
+            .apply()
     }
 }
 
 object ReminderScheduler {
     fun schedule(context: Context, reminder: Reminder) {
+        if (reminder.triggerTimeMillis <= System.currentTimeMillis() && !reminder.recurring) return
+
         var triggerAt = reminder.triggerTimeMillis
         val now = System.currentTimeMillis()
-        if (triggerAt <= now) {
-            if (reminder.recurring) {
-                while (triggerAt <= now) {
-                    triggerAt = computeNextOccurrenceAfter(triggerAt)
-                }
-            } else {
-                return
+        if (triggerAt <= now && reminder.recurring) {
+            while (triggerAt <= now) {
+                triggerAt = computeNextOccurrenceAfter(triggerAt)
             }
         }
 
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             action = ReminderReceiver.ACTION_TRIGGER_REMINDER
-            addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
             putExtra(ReminderReceiver.EXTRA_ID, reminder.id)
             putExtra(ReminderReceiver.EXTRA_TITLE, reminder.title)
             putExtra(ReminderReceiver.EXTRA_CATEGORY, reminder.category)
             putExtra(ReminderReceiver.EXTRA_RECURRING, reminder.recurring)
         }
 
-        val operationPi = PendingIntent.getBroadcast(
+        val pendingIntent = PendingIntent.getBroadcast(
             context,
             reminder.id,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val showActivityIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        }
-        val showActivityPi = PendingIntent.getActivity(
-            context,
-            reminder.id,
-            showActivityIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val timeFormatted = SimpleDateFormat("hh:mm:ss a", Locale.getDefault()).format(Date(triggerAt))
 
         try {
             val canExact = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -160,25 +176,30 @@ object ReminderScheduler {
             }
 
             if (canExact) {
-                val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerAt, showActivityPi)
-                alarmManager.setAlarmClock(alarmClockInfo, operationPi)
+                // Exact v1.0.1 AlarmClock scheduling (bypasses Doze and grants FGS start privilege)
+                val alarmClockInfo = AlarmManager.AlarmClockInfo(triggerAt, pendingIntent)
+                alarmManager.setAlarmClock(alarmClockInfo, pendingIntent)
+                ReminderRepository.recordAlarmEvent(
+                    context,
+                    "Scheduled exact AlarmClock '${reminder.title}' for $timeFormatted"
+                )
             } else {
-                alarmManager.setAndAllowWhileIdle(
+                alarmManager.setExactAndAllowWhileIdle(
                     AlarmManager.RTC_WAKEUP,
                     triggerAt,
-                    operationPi
+                    pendingIntent
+                )
+                ReminderRepository.recordAlarmEvent(
+                    context,
+                    "Scheduled allowWhileIdle '${reminder.title}' for $timeFormatted (exact permission false)"
                 )
             }
         } catch (e: SecurityException) {
-            try {
-                alarmManager.setAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    triggerAt,
-                    operationPi
-                )
-            } catch (ignored: Exception) {
-                alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAt, operationPi)
-            }
+            alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
+            ReminderRepository.recordAlarmEvent(
+                context,
+                "Scheduled fallback inexact '${reminder.title}' for $timeFormatted (SecurityException)"
+            )
         }
     }
 
@@ -186,7 +207,6 @@ object ReminderScheduler {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, ReminderReceiver::class.java).apply {
             action = ReminderReceiver.ACTION_TRIGGER_REMINDER
-            addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context,
