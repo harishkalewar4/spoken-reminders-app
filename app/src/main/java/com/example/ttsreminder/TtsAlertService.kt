@@ -44,18 +44,21 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
         acquireWakeLock()
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-        // Initialize the default Android system TextToSpeech engine
+        // Ensure notification is posted immediately in onCreate to satisfy Android Foreground Service requirements
+        val initialNotification = buildForegroundNotification("Spoken Reminder Alert")
+        startForeground(NOTIFICATION_ID, initialNotification)
+
         tts = TextToSpeech(applicationContext, this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val title = intent?.getStringExtra(ReminderReceiver.EXTRA_TITLE) ?: "Reminder"
         val category = intent?.getStringExtra(ReminderReceiver.EXTRA_CATEGORY) ?: "General"
-
         val spokenText = "$category reminder: $title. Again, $category reminder: $title."
 
         val notification = buildForegroundNotification("$category: $title")
-        startForeground(NOTIFICATION_ID, notification)
+        val nm = getSystemService(NotificationManager::class.java)
+        nm.notify(NOTIFICATION_ID, notification)
 
         if (isTtsInitialized) {
             speakOutLoud(spokenText)
@@ -74,7 +77,6 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
                 engine.setLanguage(Locale.US)
             }
 
-            // Route speech through the ALARM stream so the user hears it clearly
             val audioAttributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_ALARM)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
@@ -106,7 +108,6 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
                 }
             }
         } else {
-            // If the system TTS fails to initialize, stop service gracefully
             stopSelfSafely()
         }
     }
@@ -122,7 +123,6 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
 
     private fun onUtteranceFinished() {
         if (activeUtterances.decrementAndGet() <= 0 && pendingMessages.isEmpty()) {
-            // Give a brief 500ms buffer before tearing down audio focus and stopping the service
             mainHandler.postDelayed({
                 abandonAudioFocus()
                 stopSelfSafely()
@@ -148,25 +148,41 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun acquireWakeLock() {
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "SpokenReminders::TtsWakeLock"
-        ).apply {
-            acquire(60_000L) // Timeout after 60 seconds max
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "SpokenReminders::TtsWakeLock"
+            ).apply {
+                acquire(60_000L)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 
     private fun stopSelfSafely() {
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         stopSelf()
     }
 
     override fun onDestroy() {
-        tts?.stop()
-        tts?.shutdown()
+        try {
+            tts?.stop()
+            tts?.shutdown()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         if (wakeLock?.isHeld == true) {
-            wakeLock?.release()
+            try {
+                wakeLock?.release()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
         super.onDestroy()
     }
@@ -181,7 +197,7 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Speaks reminders aloud using the system Text-to-Speech engine."
-                setSound(null, null) // Silence standard chime so it doesn't talk over the TTS voice
+                setSound(null, null)
             }
             val nm = getSystemService(NotificationManager::class.java)
             nm.createNotificationChannel(channel)
@@ -195,6 +211,7 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
             .setContentText(contentText)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             .build()
     }
