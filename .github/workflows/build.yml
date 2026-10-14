@@ -17,7 +17,12 @@ jobs:
       - name: Accept SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: |
+          set +e
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+          code=${PIPESTATUS[0]}
+          grep -E '^e: |error:|What went wrong' -A2 build.log | head -40 | while read -r l; do echo "::error::$l"; done
+          exit $code
       - uses: actions/upload-artifact@v4
         with:
           name: SpokenReminders-debug-apk
