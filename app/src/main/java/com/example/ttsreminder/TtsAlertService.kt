@@ -29,10 +29,13 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
     companion object {
         private const val CHANNEL_ID = "tts_reminder_alert_channel"
         private const val NOTIFICATION_ID = 1001
+        private const val MAX_TTS_ATTEMPTS = 4
+        private val RETRY_DELAYS_MS = longArrayOf(1500L, 3000L, 6000L)
     }
 
     private var tts: TextToSpeech? = null
     private var isTtsInitialized = false
+    private var isDestroyed = false
     private val pendingMessages = ConcurrentLinkedQueue<String>()
     private val activeUtterances = AtomicInteger(0)
     private var wakeLock: PowerManager.WakeLock? = null
@@ -40,6 +43,13 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
     private var focusRequest: AudioFocusRequest? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var reminderToRemoveId: Int = -1
+
+    private var currentAttempt = 0
+    private var currentEngineTried: String? = null
+    private var defaultEnginePkg: String? = null
+    private val candidateEngines = mutableListOf<String>()
+    private var lastAlertTitle: String = "Speaking Reminder"
+    private var lastAlertBody: String = "You have a scheduled reminder."
 
     override fun onCreate() {
         super.onCreate()
@@ -49,7 +59,7 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
         } catch (t: Throwable) {
             ReminderRepository.recordAlarmEvent(
                 applicationContext,
-                "onCreate channel FAILED: ${t.javaClass.simpleName}: ${t.message}"
+                "onCreate channel FAILED: ${t.javaClass.simpleName}:${t.message}"
             )
         }
 
@@ -58,7 +68,7 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
         } catch (t: Throwable) {
             ReminderRepository.recordAlarmEvent(
                 applicationContext,
-                "onCreate wakeLock FAILED: ${t.javaClass.simpleName}: ${t.message}"
+                "onCreate wakeLock FAILED: ${t.javaClass.simpleName}:${t.message}"
             )
         }
 
@@ -67,7 +77,7 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
         } catch (t: Throwable) {
             ReminderRepository.recordAlarmEvent(
                 applicationContext,
-                "onCreate audioManager FAILED: ${t.javaClass.simpleName}: ${t.message}"
+                "onCreate audioManager FAILED: ${t.javaClass.simpleName}:${t.message}"
             )
         }
 
@@ -76,7 +86,7 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
         } catch (t: Throwable) {
             ReminderRepository.recordAlarmEvent(
                 applicationContext,
-                "onCreate buildNotif FAILED: ${t.javaClass.simpleName}: ${t.message}"
+                "onCreate buildNotif FAILED: ${t.javaClass.simpleName}:${t.message}"
             )
             null
         }
@@ -95,7 +105,7 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
                 }
                 ReminderRepository.recordAlarmEvent(applicationContext, "service started")
             } catch (t: Throwable) {
-                val errNote = "startForeground FAILED: ${t.javaClass.simpleName}: ${t.message}"
+                val errNote = "startForeground FAILED: ${t.javaClass.simpleName}:${t.message}"
                 ReminderRepository.recordAlarmEvent(applicationContext, errNote)
                 ReminderReceiver.postFallbackFullScreenNotification(
                     context = applicationContext,
@@ -106,21 +116,20 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
             }
         }
 
-        try {
-            tts = TextToSpeech(applicationContext, this)
-        } catch (t: Throwable) {
-            ReminderRepository.recordAlarmEvent(
-                applicationContext,
-                "onCreate TTS ctor FAILED: ${t.javaClass.simpleName}: ${t.message}"
-            )
-        }
+        discoverInstalledTtsEngines()
+        startTtsAttempt(attemptNumber = 1, explicitEngine = null)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        extendWakeLock()
+
         val title = intent?.getStringExtra(ReminderReceiver.EXTRA_TITLE) ?: "Reminder"
         val category = intent?.getStringExtra(ReminderReceiver.EXTRA_CATEGORY) ?: "General"
         val customSpoken = intent?.getStringExtra(ReminderReceiver.EXTRA_SPOKEN_TEXT)
-        val spokenText = customSpoken ?: "$category reminder: $title. Again, $category reminder: $title."
+        val spokenText = customSpoken ?: "$category reminder:$title. Again, $category reminder:$title."
+
+        lastAlertTitle = "Reminder: $category"
+        lastAlertBody = "$category:$title"
 
         val extraId = intent?.getIntExtra(ReminderReceiver.EXTRA_ID, -1) ?: -1
         if (extraId != -1) {
@@ -128,13 +137,13 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
         }
 
         try {
-            val notification = buildForegroundNotification("$category: $title")
+            val notification = buildForegroundNotification("$category:$title")
             val nm = getSystemService(NotificationManager::class.java)
             nm.notify(NOTIFICATION_ID, notification)
         } catch (t: Throwable) {
             ReminderRepository.recordAlarmEvent(
                 applicationContext,
-                "onStartCommand notify FAILED: ${t.javaClass.simpleName}: ${t.message}"
+                "onStartCommand notify FAILED: ${t.javaClass.simpleName}:${t.message}"
             )
         }
 
@@ -147,52 +156,205 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
         return START_NOT_STICKY
     }
 
+    private fun discoverInstalledTtsEngines() {
+        try {
+            val intent = Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE)
+            val resolveInfos = packageManager.queryIntentServices(intent, 0)
+            resolveInfos.forEach { info ->
+                val pkg = info.serviceInfo?.packageName
+                if (!pkg.isNullOrBlank() && !candidateEngines.contains(pkg)) {
+                    candidateEngines.add(pkg)
+                }
+            }
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        }
+    }
+
+    private fun harvestEnginesFromTtsInstance(instance: TextToSpeech?) {
+        if (instance == null) return
+        try {
+            val def = instance.defaultEngine
+            if (!def.isNullOrBlank()) {
+                defaultEnginePkg = def
+            }
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        }
+        try {
+            instance.engines?.forEach { engineInfo ->
+                val pkg = engineInfo.name
+                if (!pkg.isNullOrBlank() && !candidateEngines.contains(pkg)) {
+                    candidateEngines.add(pkg)
+                }
+            }
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        }
+    }
+
+    private fun pickEngineForRetry(attemptNumber: Int): String? {
+        // Build an ordered list: non-default engines first (e.g., if the default failed while screen-reader engine is active),
+        // followed by the default engine again once the device has been awake for a few seconds.
+        val nonDefault = candidateEngines.filter { it != defaultEnginePkg }
+        val ordered = mutableListOf<String?>()
+        nonDefault.forEach { ordered.add(it) }
+        if (!defaultEnginePkg.isNullOrBlank()) {
+            ordered.add(defaultEnginePkg)
+        }
+        ordered.add(null) // null = system default constructor
+
+        val index = (attemptNumber - 2).coerceAtLeast(0)
+        return ordered.getOrElse(index % ordered.size) { null }
+    }
+
+    private fun startTtsAttempt(attemptNumber: Int, explicitEngine: String?) {
+        if (isDestroyed) return
+        currentAttempt = attemptNumber
+        currentEngineTried = explicitEngine
+        extendWakeLock()
+
+        try {
+            // Use the Service context (`this`) rather than bare applicationContext so service binding
+            // inherits the active Foreground Service's process state and privileges on Android 14.
+            tts = if (explicitEngine.isNullOrBlank()) {
+                TextToSpeech(this, this)
+            } else {
+                TextToSpeech(this, this, explicitEngine)
+            }
+            val defLabel = try {
+                tts?.defaultEngine ?: "unknown"
+            } catch (t: Throwable) {
+                "unknown"
+            }
+            if (!defLabel.isBlank() && defLabel != "unknown") {
+                defaultEnginePkg = defLabel
+            }
+            val triedLabel = explicitEngine ?: "default($defLabel)"
+            ReminderRepository.recordAlarmEvent(
+                applicationContext,
+                "TTS init attempt $attemptNumber started (TTS engine:$triedLabel)"
+            )
+        } catch (t: Throwable) {
+            ReminderRepository.recordAlarmEvent(
+                applicationContext,
+                "TTS ctor attempt $attemptNumber FAILED: ${t.javaClass.simpleName}:${t.message}"
+            )
+            scheduleNextTtsRetryOrGiveUp(status = TextToSpeech.ERROR)
+        }
+    }
+
     override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            val engine = tts ?: return
-            val langResult = engine.setLanguage(Locale.getDefault())
-            if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
-                engine.setLanguage(Locale.US)
+        mainHandler.post {
+            if (isDestroyed) return@post
+
+            val engine = tts
+            harvestEnginesFromTtsInstance(engine)
+
+            val defEngine = defaultEnginePkg ?: "unknown"
+            val activeEnginePkg = currentEngineTried ?: defEngine
+
+            if (status == TextToSpeech.SUCCESS && engine != null) {
+                try {
+                    val langResult = engine.setLanguage(Locale.getDefault())
+                    if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        engine.setLanguage(Locale.US)
+                    }
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+
+                try {
+                    val audioAttributes = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                    engine.setAudioAttributes(audioAttributes)
+                } catch (t: Throwable) {
+                    t.printStackTrace()
+                }
+
+                engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {}
+
+                    override fun onDone(utteranceId: String?) {
+                        mainHandler.post { onUtteranceFinished() }
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) {
+                        mainHandler.post { onUtteranceFinished() }
+                    }
+
+                    override fun onError(utteranceId: String?, errorCode: Int) {
+                        mainHandler.post { onUtteranceFinished() }
+                    }
+                })
+
+                isTtsInitialized = true
+                ReminderRepository.recordAlarmEvent(
+                    applicationContext,
+                    "TTS ready (engine $activeEnginePkg)"
+                )
+
+                while (pendingMessages.isNotEmpty()) {
+                    val msg = pendingMessages.poll()
+                    if (msg != null) {
+                        speakOutLoud(msg)
+                    }
+                }
+            } else {
+                ReminderRepository.recordAlarmEvent(
+                    applicationContext,
+                    "TTS init attempt $currentAttempt failed (status=$status, TTS engine: $activeEnginePkg, default:$defEngine)"
+                )
+                scheduleNextTtsRetryOrGiveUp(status)
             }
+        }
+    }
 
-            val audioAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ALARM)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            engine.setAudioAttributes(audioAttributes)
+    private fun scheduleNextTtsRetryOrGiveUp(status: Int) {
+        try {
+            tts?.stop()
+            tts?.shutdown()
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        }
+        tts = null
+        isTtsInitialized = false
 
-            engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {}
+        if (currentAttempt < MAX_TTS_ATTEMPTS) {
+            val nextAttempt = currentAttempt + 1
+            val delayMs = RETRY_DELAYS_MS.getOrElse(currentAttempt - 1) { 3000L }
+            val nextEngine = pickEngineForRetry(nextAttempt)
+            extendWakeLock()
 
-                override fun onDone(utteranceId: String?) {
-                    onUtteranceFinished()
-                }
-
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) {
-                    onUtteranceFinished()
-                }
-
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    onUtteranceFinished()
-                }
-            })
-
-            isTtsInitialized = true
-            ReminderRepository.recordAlarmEvent(applicationContext, "service started -> TTS initialized, speaking")
-            while (pendingMessages.isNotEmpty()) {
-                val msg = pendingMessages.poll()
-                if (msg != null) {
-                    speakOutLoud(msg)
-                }
-            }
+            mainHandler.postDelayed({
+                startTtsAttempt(attemptNumber = nextAttempt, explicitEngine = nextEngine)
+            }, delayMs)
         } else {
-            ReminderRepository.recordAlarmEvent(applicationContext, "TTS init failed (status=$status)")
-            stopSelfSafely()
+            // All 4 attempts failed: post persistent high-priority full-screen alarm notification
+            val fallbackMsg = pendingMessages.peek() ?: lastAlertBody
+            ReminderReceiver.postFallbackFullScreenNotification(
+                context = applicationContext,
+                title = lastAlertTitle,
+                contentText = fallbackMsg,
+                reasonNote = "TTS init failed (status=$status)"
+            )
+            ReminderRepository.recordAlarmEvent(
+                applicationContext,
+                "TTS gave up after $MAX_TTS_ATTEMPTS attempts, notification shown"
+            )
+            if (reminderToRemoveId != -1) {
+                ReminderRepository.removeReminderRecordOnly(applicationContext, reminderToRemoveId)
+                reminderToRemoveId = -1
+            }
+            stopSelfKeepingNotification()
         }
     }
 
     private fun speakOutLoud(text: String) {
+        extendWakeLock()
         requestAudioFocus()
         val utteranceId = "REMINDER_UTTERANCE_${System.currentTimeMillis()}_${activeUtterances.incrementAndGet()}"
         val params = Bundle().apply {
@@ -251,7 +413,20 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
             "SpokenReminders::TtsWakeLock"
         ).apply {
             setReferenceCounted(false)
-            acquire(60_000L)
+            acquire(90_000L)
+        }
+    }
+
+    private fun extendWakeLock() {
+        try {
+            val wl = wakeLock
+            if (wl != null) {
+                wl.acquire(90_000L)
+            } else {
+                acquireWakeLock()
+            }
+        } catch (t: Throwable) {
+            t.printStackTrace()
         }
     }
 
@@ -264,7 +439,18 @@ class TtsAlertService : Service(), TextToSpeech.OnInitListener {
         stopSelf()
     }
 
+    private fun stopSelfKeepingNotification() {
+        try {
+            stopForeground(STOP_FOREGROUND_DETACH)
+        } catch (t: Throwable) {
+            t.printStackTrace()
+        }
+        stopSelf()
+    }
+
     override fun onDestroy() {
+        isDestroyed = true
+        mainHandler.removeCallbacksAndMessages(null)
         if (reminderToRemoveId != -1) {
             ReminderRepository.removeReminderRecordOnly(applicationContext, reminderToRemoveId)
             reminderToRemoveId = -1
