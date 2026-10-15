@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.ttsreminder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.1.0"
+        versionCode = 100 + (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0)
+        versionName = "1.1.4"
     }
 
     buildFeatures {
