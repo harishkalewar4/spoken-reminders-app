@@ -15,6 +15,18 @@ android {
         versionName = "1.1.4"
     }
 
+    signingConfigs {
+        getByName("debug") {
+            val ks = rootProject.file("ci/debug.keystore")
+            if (ks.exists()) {
+                storeFile = ks
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
+    }
+
     buildFeatures {
         compose = true
     }
