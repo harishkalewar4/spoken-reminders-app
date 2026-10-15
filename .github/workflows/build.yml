@@ -16,6 +16,10 @@ jobs:
           gradle-version: '8.7'
       - name: Accept SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Install stable debug signing key
+        run: |
+          mkdir -p ~/.android
+          base64 -d ci/debug.keystore.b64 > ~/.android/debug.keystore
       - name: Build debug APK
         run: |
           set +e
